@@ -13,6 +13,13 @@ import (
 	"github.com/vharitonsky/iniflags"
 )
 
+const (
+	REMOTE_AUTH_plain                       = "plain"
+	REMOTE_AUTH_xoauth2                     = "xoauth2"
+	REMOTE_AUTH_xoauth2_client_credentials  = "xoauth2_client_credentials"
+	REMOTE_AUTH_microsoft_graph_credentials = "microsoft_graph_credentials"
+)
+
 //nolint:govet
 type config struct {
 	logFormat                  string
@@ -51,6 +58,9 @@ type config struct {
 	xoauth2TokenURL            string
 	xoauth2RefreshToken        string
 	xoauth2Scopes              string
+	graphClientID              string
+	graphClientSecret          string
+	graphTenantID              string
 	allowedNets                []*net.IPNet
 	logHeaders                 map[string]string
 }
@@ -98,7 +108,7 @@ func loadConfig() (*config, error) {
 	}
 
 	switch cfg.remoteAuth {
-	case "xoauth2":
+	case REMOTE_AUTH_xoauth2:
 		if cfg.remoteUser == "" {
 			return nil, errors.New("remote_user is required for xoauth2 authentication")
 		}
@@ -114,7 +124,7 @@ func loadConfig() (*config, error) {
 		if cfg.xoauth2RefreshToken == "" {
 			return nil, errors.New("xoauth2_refresh_token is required for xoauth2 authentication")
 		}
-	case "xoauth2_client_credentials":
+	case REMOTE_AUTH_xoauth2_client_credentials:
 		if cfg.remoteUser == "" {
 			return nil, errors.New("remote_user is required for xoauth2_client_credentials authentication")
 		}
@@ -126,6 +136,19 @@ func loadConfig() (*config, error) {
 		}
 		if cfg.xoauth2TokenURL == "" {
 			return nil, errors.New("xoauth2_token_url is required for xoauth2_client_credentials authentication")
+		}
+	case REMOTE_AUTH_microsoft_graph_credentials:
+		if cfg.remoteUser == "" {
+			return nil, errors.New("remote_user is required for microsoft_graph_credentials authentication")
+		}
+		if cfg.graphClientID == "" {
+			return nil, errors.New("graphClientID is required for microsoft_graph_credentials authentication")
+		}
+		if cfg.graphClientSecret == "" {
+			return nil, errors.New("} is required for microsoft_graph_credentials authentication")
+		}
+		if cfg.graphTenantID == "" {
+			return nil, errors.New("graphTenantID is required for microsoft_graph_credentials authentication")
 		}
 	}
 
@@ -163,7 +186,7 @@ func registerFlags(f *flag.FlagSet, cfg *config) {
 	f.DurationVar(&cfg.writeTimeout, "write_timeout", 60*time.Second, "Socket timeout for write operations")
 	f.DurationVar(&cfg.dataTimeout, "data_timeout", 5*time.Minute, "Socket timeout for DATA command")
 	f.StringVar(&cfg.remotePass, "remote_pass", "", "Password for authentication on outgoing SMTP server (set $REMOTE_PASS to use env var instead)")
-	f.StringVar(&cfg.remoteAuth, "remote_auth", "plain", "Auth method on outgoing SMTP server (plain, xoauth2, xoauth2_client_credentials)")
+	f.StringVar(&cfg.remoteAuth, "remote_auth", "plain", "Auth method on outgoing SMTP server (plain, xoauth2, xoauth2_client_credentials,microsoft_graph_credentials)")
 	f.StringVar(&cfg.remoteSender, "remote_sender", "", "Sender email address on outgoing SMTP server")
 	f.BoolVar(&cfg.versionInfo, "version", false, "Show version information")
 	f.StringVar(&cfg.logLevel, "log_level", "debug", "Minimum log level to output")
@@ -177,6 +200,10 @@ func registerFlags(f *flag.FlagSet, cfg *config) {
 	f.StringVar(&cfg.xoauth2RefreshToken, "xoauth2_refresh_token", "", "Refresh token for OAuth2 authentication")
 	f.StringVar(&cfg.xoauth2TokenURL, "xoauth2_token_url", "", "OAuth2 token endpoint URL")
 	f.StringVar(&cfg.xoauth2Scopes, "xoauth2_scopes", "", "Space-separated OAuth2 scopes for xoauth2_client_credentials authentication")
+
+	f.StringVar(&cfg.graphClientID, "graph_client_id", "", "Client ID for graph authentication")
+	f.StringVar(&cfg.graphClientSecret, "graph_client_secret", "", "Client secret for graph authentication")
+	f.StringVar(&cfg.graphTenantID, "graph_tenant_id", "", "Tenant ID for graph authentication")
 }
 
 // parse the input into a map[string]string. It should be in the form of

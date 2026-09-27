@@ -1,11 +1,13 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/tls"
 	"errors"
 	"fmt"
 	"log/slog"
+	"mime"
 	"net"
 	"net/smtp"
 	"net/textproto"
@@ -15,8 +17,10 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/grafana/smtprelay/v2/internal/microsoftgraph"
 	"github.com/grafana/smtprelay/v2/internal/smtpd"
 	"github.com/grafana/smtprelay/v2/internal/traceutil"
+	"github.com/jhillyerd/enmime"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/codes"
 	semconv "go.opentelemetry.io/otel/semconv/v1.21.0"
@@ -32,6 +36,7 @@ type relay struct {
 	cfg               *config
 	rateLimiter       *rateLimiter
 	oauth2TokenSource oauth2.TokenSource
+	msGraphMailer     *microsoftgraph.MicrosoftGraphMailer
 }
 
 func newRelay(ctx context.Context, cfg *config) (*relay, error) {
@@ -70,7 +75,7 @@ func newRelay(ctx context.Context, cfg *config) (*relay, error) {
 	}
 
 	switch cfg.remoteAuth {
-	case "xoauth2":
+	case REMOTE_AUTH_xoauth2:
 		oauth2Config := &oauth2.Config{
 			ClientID:     cfg.xoauth2ClientID,
 			ClientSecret: cfg.xoauth2ClientSecret,
@@ -87,7 +92,7 @@ func newRelay(ctx context.Context, cfg *config) (*relay, error) {
 		r.oauth2TokenSource = oauth2.ReuseTokenSource(
 			initialToken,
 			oauth2Config.TokenSource(ctx, initialToken))
-	case "xoauth2_client_credentials":
+	case REMOTE_AUTH_xoauth2_client_credentials:
 		var scopes []string
 		if cfg.xoauth2Scopes != "" {
 			scopes = splitstr(cfg.xoauth2Scopes, ' ')
@@ -99,6 +104,15 @@ func newRelay(ctx context.Context, cfg *config) (*relay, error) {
 			Scopes:       scopes,
 		}
 		r.oauth2TokenSource = oauth2.ReuseTokenSource(nil, ccConfig.TokenSource(ctx))
+	case REMOTE_AUTH_microsoft_graph_credentials:
+		graph, err := microsoftgraph.NewMicrosoftGraphMailer(
+			cfg.graphTenantID,
+			cfg.graphClientID,
+			cfg.graphClientSecret)
+		if err != nil {
+			return nil, err
+		}
+		r.msGraphMailer = graph
 	}
 	return r, nil
 }
@@ -381,13 +395,13 @@ func (r *relay) mailHandler(cfg *config) func(ctx context.Context, peer smtpd.Pe
 		host, _, _ := net.SplitHostPort(cfg.remoteHost)
 
 		hasUser := cfg.remoteUser != ""
-		canAuth := hasUser && (cfg.remotePass != "" || cfg.remoteAuth == "xoauth2" || cfg.remoteAuth == "xoauth2_client_credentials")
+		canAuth := hasUser && (cfg.remotePass != "" || cfg.remoteAuth == REMOTE_AUTH_xoauth2 || cfg.remoteAuth == REMOTE_AUTH_xoauth2_client_credentials)
 
 		if canAuth {
 			switch cfg.remoteAuth {
-			case "plain":
+			case REMOTE_AUTH_plain:
 				auth = smtp.PlainAuth("", cfg.remoteUser, cfg.remotePass, host)
-			case "xoauth2", "xoauth2_client_credentials":
+			case REMOTE_AUTH_xoauth2, REMOTE_AUTH_xoauth2_client_credentials:
 				var authToken *oauth2.Token
 
 				authToken, err = r.oauth2TokenSource.Token()
@@ -420,13 +434,44 @@ func (r *relay) mailHandler(cfg *config) func(ctx context.Context, peer smtpd.Pe
 
 		msgSizeHistogram.Observe(float64(len(env.Data)))
 
-		err = smtp.SendMail(
-			cfg.remoteHost,
-			auth,
-			sender,
-			env.Recipients,
-			env.Data,
-		)
+		switch cfg.remoteAuth {
+		case REMOTE_AUTH_microsoft_graph_credentials:
+			if r.msGraphMailer != nil {
+				e, err := enmime.ReadEnvelope(bytes.NewReader(env.Data))
+				if err != nil {
+					err = fmt.Errorf("enmime.ReadEnvelope : %w", err)
+					logger.ErrorContext(ctx, "delivery failed", fmt.Sprintf("%v\n", err))
+				} else {
+					subjectRaw := strings.ReplaceAll(e.Root.Header.Get("Subject"), "=0D=0A", "")
+					dec := new(mime.WordDecoder)
+					subject, err := dec.DecodeHeader(subjectRaw)
+					if err != nil {
+						err = fmt.Errorf("mime.WordDecoder : %w", err)
+						logger.ErrorContext(ctx, "delivery failed", fmt.Sprintf("%v\n", err))
+					} else {
+						bodyType := "TEXT"
+						content := e.Text
+						if len(e.HTML) > 0 {
+							bodyType = "HTML"
+							content = e.HTML
+						}
+						err = r.msGraphMailer.SendMail(bodyType, subject, sender, env.Recipients, []byte(content))
+					}
+				}
+			} else {
+				logger.ErrorContext(ctx, "delivery failed", "graph mailer is nil")
+				err = fmt.Errorf("sendMail: %s", "graph mailer is nil")
+			}
+		default:
+			err = smtp.SendMail(
+				cfg.remoteHost,
+				auth,
+				sender,
+				env.Recipients,
+				env.Data,
+			)
+		}
+
 		if err != nil {
 			err = fmt.Errorf("sendMail: %w", err)
 
